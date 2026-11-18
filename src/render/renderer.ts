@@ -1,6 +1,7 @@
 import type { World } from '../sim/world';
 
 const PANIC_BUCKETS = 4;
+const DEPTH_BUCKETS = 4;
 
 function hexToRgb(hex: string): [number, number, number] {
   const v = parseInt(hex.replace('#', ''), 16);
@@ -40,15 +41,22 @@ export class Renderer {
     this.canvas.style.height = `${height}px`;
   }
 
-  /** Calm birds use the flock colour; panicked birds blend toward white. */
+  /**
+   * Colour per (depth, panic) bucket. Calm birds use the flock colour, panicked birds
+   * blend toward white. Far birds are dimmer.
+   */
   private ensureColors(hex: string): void {
     if (this.colorFor === hex) return;
     const [r, g, b] = hexToRgb(hex);
     this.bucketColors = [];
-    for (let k = 0; k < PANIC_BUCKETS; k++) {
-      const t = k / (PANIC_BUCKETS - 1);
-      const mix = (c: number) => Math.round(c + (255 - c) * t);
-      this.bucketColors.push(`rgba(${mix(r)}, ${mix(g)}, ${mix(b)}, ${0.82 + 0.18 * t})`);
+    for (let d = 0; d < DEPTH_BUCKETS; d++) {
+      const near = d / (DEPTH_BUCKETS - 1);
+      for (let k = 0; k < PANIC_BUCKETS; k++) {
+        const t = k / (PANIC_BUCKETS - 1);
+        const mix = (c: number) => Math.round(c + (255 - c) * t);
+        const alpha = 0.32 + 0.5 * near + 0.18 * t;
+        this.bucketColors.push(`rgba(${mix(r)}, ${mix(g)}, ${mix(b)}, ${alpha.toFixed(3)})`);
+      }
     }
     this.colorFor = hex;
   }
@@ -56,6 +64,7 @@ export class Renderer {
   draw(world: World, opts: RenderOptions): void {
     const { ctx } = this;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = `rgba(${opts.background}, ${1 - opts.trails})`;
     ctx.fillRect(0, 0, this.width, this.height);
 
@@ -63,32 +72,46 @@ export class Renderer {
     this.drawPredator(world);
   }
 
+  /**
+   * The flock is a 3D slab drawn flattened. Near birds are longer, thicker and brighter.
+   * A bird flying toward or away from the viewer looks foreshortened. Strokes add up
+   * ('lighter'), so where the flock is seen edge-on it reads as a dense, bright band.
+   */
   private drawFlock(world: World): void {
     const { ctx } = this;
     const flock = world.flock;
-    const { n, x, y, vx, vy, panic } = flock;
+    const { n, x, y, z, vx, vy, vz, panic } = flock;
+    const halfD = flock.depth / 2 || 1;
     this.ensureColors(flock.color);
 
     if (this.bucketOf.length < n) this.bucketOf = new Uint8Array(n);
     const bucketOf = this.bucketOf;
     for (let i = 0; i < n; i++) {
-      const b = Math.round(panic[i] * (PANIC_BUCKETS - 1));
-      bucketOf[i] = b < 0 ? 0 : b >= PANIC_BUCKETS ? PANIC_BUCKETS - 1 : b;
+      let pb = Math.round(panic[i] * (PANIC_BUCKETS - 1));
+      pb = pb < 0 ? 0 : pb >= PANIC_BUCKETS ? PANIC_BUCKETS - 1 : pb;
+      let db = Math.floor(((z[i] / halfD + 1) / 2) * DEPTH_BUCKETS);
+      db = db < 0 ? 0 : db >= DEPTH_BUCKETS ? DEPTH_BUCKETS - 1 : db;
+      bucketOf[i] = db * PANIC_BUCKETS + pb;
     }
 
-    const len = 3.6;
-    ctx.lineWidth = 1.6;
+    ctx.globalCompositeOperation = 'lighter';
     ctx.lineCap = 'round';
-    for (let b = 0; b < PANIC_BUCKETS; b++) {
+    const total = DEPTH_BUCKETS * PANIC_BUCKETS;
+    for (let b = 0; b < total; b++) {
+      const near = Math.floor(b / PANIC_BUCKETS) / (DEPTH_BUCKETS - 1);
+      const len = 2.6 + 2.2 * near;
+      ctx.lineWidth = 1.0 + 1.1 * near;
       ctx.beginPath();
       let any = false;
       for (let i = 0; i < n; i++) {
         if (bucketOf[i] !== b) continue;
-        const s = Math.hypot(vx[i], vy[i]) || 1;
+        const s = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]) || 1;
+        // Projected direction keeps its 3D length, so head-on birds look short.
         const ux = (vx[i] / s) * len;
         const uy = (vy[i] / s) * len;
-        ctx.moveTo(x[i] - ux, y[i] - uy);
-        ctx.lineTo(x[i] + ux, y[i] + uy);
+        const ox = Math.abs(ux) + Math.abs(uy) < 0.6 ? 0.6 : 0; // keep a visible dot
+        ctx.moveTo(x[i] - ux - ox, y[i] - uy);
+        ctx.lineTo(x[i] + ux + ox, y[i] + uy);
         any = true;
       }
       if (any) {
@@ -96,6 +119,7 @@ export class Renderer {
         ctx.stroke();
       }
     }
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   private drawPredator(world: World): void {

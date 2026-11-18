@@ -1,4 +1,4 @@
-import type { Flock } from './flock';
+import { slabDepth, type Flock } from './flock';
 
 export type PredatorState = 'idle' | 'attack' | 'leave';
 
@@ -13,8 +13,10 @@ export class Predator {
   state: PredatorState = 'idle';
   x = 0;
   y = 0;
+  z = 0;
   vx = 0;
   vy = 0;
+  vz = 0;
   /** Seconds spent in the current state. */
   t = 0;
   target = -1;
@@ -41,13 +43,16 @@ export class Predator {
     const r = Math.hypot(width, height) / 2 + 60;
     this.x = width / 2 + Math.cos(angle) * r;
     this.y = height / 2 + Math.sin(angle) * r;
+    this.z = (Math.random() - 0.5) * slabDepth(width, height) * 0.5;
 
     const s = this.cruiseSpeed(flock);
     const dx = flock.x[this.target] - this.x;
     const dy = flock.y[this.target] - this.y;
-    const d = Math.hypot(dx, dy) || 1;
+    const dz = flock.z[this.target] - this.z;
+    const d = Math.hypot(dx, dy, dz) || 1;
     this.vx = (dx / d) * s;
     this.vy = (dy / d) * s;
+    this.vz = (dz / d) * s;
 
     this.state = 'attack';
     this.t = 0;
@@ -63,7 +68,8 @@ export class Predator {
       if (this.target >= flock.n) this.target = Math.floor(Math.random() * flock.n);
       const dx = flock.x[this.target] - this.x;
       const dy = flock.y[this.target] - this.y;
-      const d = Math.hypot(dx, dy);
+      const dz = flock.z[this.target] - this.z;
+      const d = Math.hypot(dx, dy, dz);
 
       if (d < 10 || this.t > 5) {
         this.state = 'leave';
@@ -73,25 +79,30 @@ export class Predator {
         const maxForce = speed * 2.4;
         let sx = (dx / d) * speed - this.vx;
         let sy = (dy / d) * speed - this.vy;
-        const sm = Math.hypot(sx, sy);
+        let sz = (dz / d) * speed - this.vz;
+        const sm = Math.hypot(sx, sy, sz);
         if (sm > maxForce) {
           sx *= maxForce / sm;
           sy *= maxForce / sm;
+          sz *= maxForce / sm;
         }
         this.vx += sx * dt;
         this.vy += sy * dt;
+        this.vz += sz * dt;
       }
     }
 
     // Hold cruise speed (slight acceleration while leaving).
     const target = this.state === 'leave' ? speed * 1.2 : speed;
-    const s = Math.hypot(this.vx, this.vy) || 1;
+    const s = Math.hypot(this.vx, this.vy, this.vz) || 1;
     const ns = s + (target - s) * Math.min(1, dt * 4);
     this.vx = (this.vx / s) * ns;
     this.vy = (this.vy / s) * ns;
+    this.vz = (this.vz / s) * ns;
 
     this.x += this.vx * dt;
     this.y += this.vy * dt;
+    this.z += this.vz * dt;
     this.pushTrail();
 
     if (this.state === 'leave') {

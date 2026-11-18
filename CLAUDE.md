@@ -22,12 +22,12 @@ Visual checks: build, `vite preview`, then headless Chrome `--screenshot` with `
 src/sim/       pure simulation, no DOM (can move to a worker later)
   params.ts      user params + defaults + limits (max 4000 birds, 20 neighbours)
   grid.ts        uniform spatial grid via counting sort
-  flock.ts       boids: k-nearest (topological) neighbours, panic propagation, containment, banking turns
+  flock.ts       3D boids in a shallow slab: k-nearest (topological) neighbours, panic + turning-wave propagation, containment, banking turns
   predator.ts    threat agent: spawns off-screen, homes on one bird with limited turn rate, leaves
   descriptors.ts 0-1 stream sources computed every step
-  world.ts       owns flock + predator + nav target; fixed 60 Hz step; auto strike
+  world.ts       owns flock + predator + nav target; triggers turning waves; fixed 60 Hz step; auto strike
 src/midi/      slots.ts (pure mapping), output.ts (Web MIDI), engine.ts (throttle + learn)
-src/render/    canvas 2D renderer (reads the world only)
+src/render/    canvas 2D renderer (reads the world only); flattens the 3D slab with depth cues + additive blending
 src/ui/        placeholder controls, meters, MIDI panel. To be replaced by the Figma build
 src/ticker.ts  Web Worker interval: drives sim + MIDI so they keep running when the window is hidden
 src/main.ts    wiring; sim/MIDI on the worker tick, drawing on requestAnimationFrame
@@ -45,28 +45,33 @@ tools/         headless test + metric scripts (bundled with esbuild via tools/ru
 - **Extra stream "Panic"** (mean panic) added beyond the spec's list.
 - **Swirl** is signed (0.5 = none). **Turbulence** is local heading disagreement, deliberately different from global Alignment.
 - **Centre X/Y** are normalised to the sky ellipse's bounding box, not the window, so they still span 0-1.
-- **Containment (current):** (1) every bird is pulled toward a shared nav target in the central sky that the World moves every 3-8 s, chosen 50-140° to a random side of the flock's heading; (2) a sky ellipse (36% × 34% radii) with a strong pull back once a bird's predicted position leaves it; (3) a thin last-resort edge zone (7%) plus a hard clamp 6 px from the edge. Birds never flee outward near an edge, and noise fades in the edge zone.
+- **3D slab, drawn flattened:** birds have x, y and z. Depth = 50% of the smaller screen dimension. The renderer draws near birds longer, thicker and brighter, foreshortens birds flying toward or away from the viewer, and uses additive blending so edge-on parts of the flock read as dense bright bands. This is what makes it look like a murmuration rather than a 2D school. kNN uses the x/y grid with 3D distances (the ring stopping rule still holds).
+- **Turning waves:** direction changes start with ~2% of birds on a random edge of the flock taking up a new heading. Neighbours copy it (× 0.96 per hop, one hop per step, decay 1/s), so the turn sweeps through the flock and it folds and morphs. This uses the same `Signal` propagation as panic.
+- **When turns happen (world.ts `updateNav`):** every 3-8 s, when the flock reaches its target, or when its predicted centroid passes 70% of the sky ellipse (1.5 s cooldown). Boundary turns pick a target that reverses the flock's rotation about the centre 75% of the time. Without that, every inward turn keeps the same rotation and the flock orbits; boundary-following was the root cause of the "fish in a tank" look.
+- **Containment layers:** (1) weak pull (0.2) toward the nav target; (2) a sky ellipsoid (36% × 34% of the view, 40% of the slab depth) with a strong pull back once a bird's predicted position leaves it; (3) a thin last-resort edge zone (7%, and the slab's front/back) plus a hard clamp 6 px from the window edge. Birds never flee outward near an edge, and noise fades in the edge zone.
 - **Banking turns:** sideways acceleration is capped at v²/r_min, with r_min = 0.25 s × cruise speed, halved when panicking.
+- **Descriptors in 3D:** Speed, Alignment, Turbulence and Threat distance use 3D motion. Centre, Spread and Swirl use on-screen x/y so they match what you see.
 
 ## Status
 
 Done: spec milestones 1-4 (single flock sim, threat, stream meters, MIDI out with learn), plus containment work.
 
-Measured (`npm run metrics:flight`, default settings, auto strike every 10 s):
+Measured (`npm run metrics:flight` / `metrics:bounds`, default settings, auto strike every 10 s):
 
-| Metric | Before containment rework | Now |
-|---|---|---|
-| Birds outside window | ~2% (10% when fast + noisy) | 0% |
-| Centroid in a corner | 5.4% | 0% |
-| Circling index (1 = always turning the same way) | 0.94 | 0.68 |
+| Metric | Original 2D | 2D + shared target ("blob") | Now (3D + turning waves) |
+|---|---|---|---|
+| Birds outside window | ~2% (10% fast + noisy) | 0% | 0% |
+| Centroid in a corner | 5.4% | 0% | 0% |
+| Circling index (1 = always same way) | 0.94 | 0.70 | 0.67 |
+| Aspect-ratio sd (shape morphing) | n/a | 0.41 | 0.56 |
+| Mean alignment | n/a | 0.93 | 0.87 |
+
+Performance: 1.5 ms/step for 1200 birds, 6.3 ms/step for 4000 (Node). Fine at 60 Hz, though 4000 uses about 40% of a core.
 
 ## Open issues / next up
 
-- **Flock look is the top issue.** The user reported it looked like "fish in a tank": hugging edges, circling, heading into corners. Containment and circling are fixed, but the flock is now a tight, very aligned blob (alignment ≈ 0.98, turbulence ≈ 0), not murmuration-like. Candidate fixes:
-  - Pseudo-3D: simulate a z axis in a thin slab and project, so the flock appears to fold and change density. The spec allows 3D later.
-  - Turning waves started by edge birds (reuse the panic-propagation mechanism with a heading but no speed-up), instead of every bird steering to the same nav point.
-  - Lower NAV_WEIGHT now that the sky ellipse handles containment, and looser cohesion/separation.
-  - Track it with `metrics:flight`, and add a metric for shape/density variation.
+- **Flock look:** reworked to 3D + turning waves after the user reported "fish in a tank" (edge-hugging, circling, corners). Screenshots now show ribbons, folds and density bands. Wait for user feedback before tuning further. Possible next levers: density (more birds by default, smaller separation), wave initiation rate, slab depth.
+- 4000 birds costs 6.3 ms/step. If that's a problem, move the sim to a worker or use WebGL rendering.
 - Milestone 5: MIDI clock in (24 ppqn, Start/Stop/Continue), BPM fallback, clock-synced strikes. VCV Rack's Core CV-MIDI may provide clock (to verify).
 - Milestone 6: 2-4 flocks + interaction slider (slots already carry a `flock` field, always 0 for now).
 - Milestone 7: presets (JSON), 14-bit/NRPN/OSC (open decision), MIDI input to trigger the threat.

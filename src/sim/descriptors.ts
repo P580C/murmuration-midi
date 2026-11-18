@@ -57,27 +57,34 @@ export function computeDescriptors(
   const n = flock.n;
   if (n === 0) return Object.assign(out, emptyDescriptors());
 
-  const { x, y, vx, vy, panic } = flock;
+  const { x, y, z, vx, vy, vz, panic } = flock;
 
+  // Speed, alignment and threat distance use the full 3D motion. Position, spread and
+  // swirl use the projected (on-screen) x/y, so they match what you see.
   let cx = 0;
   let cy = 0;
+  let cz = 0;
   let sumSpeed = 0;
   let hx = 0;
   let hy = 0;
+  let hz = 0;
   let panicSum = 0;
   for (let i = 0; i < n; i++) {
     cx += x[i];
     cy += y[i];
-    const s = Math.hypot(vx[i], vy[i]);
+    cz += z[i];
+    const s = Math.sqrt(vx[i] * vx[i] + vy[i] * vy[i] + vz[i] * vz[i]);
     sumSpeed += s;
     if (s > 1e-6) {
       hx += vx[i] / s;
       hy += vy[i] / s;
+      hz += vz[i] / s;
     }
     panicSum += panic[i];
   }
   cx /= n;
   cy /= n;
+  cz /= n;
 
   let spreadSum = 0;
   let swirlSum = 0;
@@ -101,11 +108,11 @@ export function computeDescriptors(
   out.centreY = clamp01(1 - (cy - (height / 2 - ry)) / (2 * ry));
   out.spread = clamp01(spreadSum / n / (minDim * 0.35));
   out.speed = clamp01(sumSpeed / n / (flock.params.speed * 1.8));
-  out.alignment = clamp01(Math.hypot(hx, hy) / n);
+  out.alignment = clamp01(Math.sqrt(hx * hx + hy * hy + hz * hz) / n);
   out.swirl = clamp01((swirlSum / n + 1) / 2);
   out.turbulence = clamp01(flock.localDisorder * 4);
   out.threatDistance = pred.active
-    ? clamp01(Math.hypot(pred.x - cx, pred.y - cy) / (Math.hypot(width, height) * 0.5))
+    ? clamp01(Math.hypot(pred.x - cx, pred.y - cy, pred.z - cz) / (Math.hypot(width, height) * 0.5))
     : 1;
   out.panic = clamp01(panicSum / n);
   return out;

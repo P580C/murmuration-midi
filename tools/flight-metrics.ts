@@ -3,6 +3,7 @@ import { World } from '../src/sim/world';
 const W = 1080, H = 900, SEC = 60, RUNS = 3;
 let edgeBirds = 0, birdSamples = 0, corner = 0, central = 0, samples = 0, edgeDist = 0;
 let circSum = 0, circN = 0, turnAbs = 0, turnN = 0;
+const spreadS: number[] = [], aspectS: number[] = [], alignS: number[] = [], turbS: number[] = [];
 const covered = new Set<string>();
 for (let r = 0; r < RUNS; r++) {
   const w = new World(W, H);
@@ -18,6 +19,13 @@ for (let r = 0; r < RUNS; r++) {
       cx += x; cy += y; hx += f.vx[i]; hy += f.vy[i];
     }
     birdSamples += f.n; cx /= f.n; cy /= f.n; samples++;
+    // Shape: eigenvalues of the projected (xy) covariance -> aspect ratio.
+    let sxx = 0, syy = 0, sxy = 0;
+    for (let i = 0; i < f.n; i++) { const dx = f.x[i] - cx, dy = f.y[i] - cy; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+    sxx /= f.n; syy /= f.n; sxy /= f.n;
+    const tr = sxx + syy, det = sxx * syy - sxy * sxy, disc = Math.sqrt(Math.max(0, tr * tr / 4 - det));
+    const l1 = tr / 2 + disc, l2 = Math.max(1e-6, tr / 2 - disc);
+    if (s % 6 === 0) { aspectS.push(Math.sqrt(l1 / l2)); spreadS.push(w.descriptors.spread); alignS.push(w.descriptors.alignment); turbS.push(w.descriptors.turbulence); }
     const nx = cx / W, ny = cy / H;
     if ((nx < 0.25 || nx > 0.75) && (ny < 0.25 || ny > 0.75)) corner++;
     if (nx > 0.25 && nx < 0.75 && ny > 0.25 && ny < 0.75) central++;
@@ -39,3 +47,10 @@ console.log(`centroid dist to edge      ${(edgeDist / samples).toFixed(3)} × mi
 console.log(`circling index (8 s)       ${(circSum / circN).toFixed(2)}   (1 = always turning the same way)`);
 console.log(`flock turn rate            ${(turnAbs / turnN * 60).toFixed(2)} rad/s`);
 console.log(`screen cells visited       ${covered.size}/36`);
+
+const mean = (a: number[]) => a.reduce((x, y) => x + y, 0) / a.length;
+const sd = (a: number[]) => { const m = mean(a); return Math.sqrt(mean(a.map((v) => (v - m) ** 2))); };
+console.log(`aspect ratio mean / sd     ${mean(aspectS).toFixed(2)} / ${sd(aspectS).toFixed(2)}   (shape variety: higher sd = more morphing)`);
+console.log(`spread mean / sd           ${mean(spreadS).toFixed(2)} / ${sd(spreadS).toFixed(2)}`);
+console.log(`alignment mean / sd        ${mean(alignS).toFixed(2)} / ${sd(alignS).toFixed(2)}`);
+console.log(`turbulence mean / sd       ${mean(turbS).toFixed(2)} / ${sd(turbS).toFixed(2)}`);
