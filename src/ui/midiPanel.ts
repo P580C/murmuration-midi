@@ -1,5 +1,6 @@
 import type { MidiEngine } from '../midi/engine';
 import { SLOT_COUNT, type Curve, type SlotConfig } from '../midi/slots';
+import { QUANTISE_OPTIONS, type Quantise, type TriggerConfig, type VelocityMode } from '../midi/triggers';
 import { DESCRIPTOR_META, type DescriptorKey } from '../sim/descriptors';
 import { button, el, numberField, section, select, setOptions, slider, toggle } from './controls';
 
@@ -21,6 +22,10 @@ export class MidiPanel {
   private readonly portSelect: HTMLSelectElement;
   private readonly statusLine: HTMLElement;
   private readonly help: HTMLElement;
+  private readonly clockSelect: HTMLSelectElement;
+  private readonly clockStatus: HTMLElement;
+  private readonly trigStatus: HTMLElement;
+  private readonly trigDot: HTMLElement;
 
   constructor(
     private readonly engine: MidiEngine,
@@ -46,13 +51,124 @@ export class MidiPanel {
       this.onChange();
     });
 
+    // ----- Clock -----
+    const clock = engine.clock;
+    this.clockSelect = select([], clock.inputId, (id) => {
+      clock.selectInput(id);
+      this.onChange();
+    });
+    this.clockSelect.setAttribute('aria-label', 'Clock input');
+    this.clockStatus = el('div', 'midi-status clock-status');
+    const bpmRow = el('div', 'slot-grid');
+    bpmRow.append(
+      numberField('Internal BPM', 20, 300, clock.manualBpm, (v) => {
+        clock.manualBpm = v;
+        this.onChange();
+      }),
+    );
+    const clockHelp = el('p', 'help');
+    clockHelp.textContent =
+      'Follows MIDI clock from your DAW or VCV Rack (send clock to the IAC port). With no clock, the internal BPM is used.';
+
+    // ----- Panic triggers -----
+    this.trigDot = el('span', 'slot-dot');
+    this.trigStatus = el('span', 'muted');
+    const trigHead = el('div', 'row');
+    trigHead.append(this.trigDot, this.trigStatus);
+
     this.element.append(
       section('Output', this.portSelect, this.statusLine, sendToggle, this.help),
+      section('Clock', this.clockSelect, this.clockStatus, bpmRow, clockHelp),
+      section('Panic triggers', ...this.buildTriggers(trigHead)),
       section('Slots', this.buildSlots()),
     );
 
     engine.output.onChange(() => this.refreshPorts());
+    clock.onChange(() => this.refreshClockInputs());
     this.refreshPorts();
+    this.refreshClockInputs();
+  }
+
+  private buildTriggers(statusRow: HTMLElement): HTMLElement[] {
+    const t = this.engine.triggers;
+    const patch = (p: Partial<TriggerConfig>) => {
+      t.cfg = { ...t.cfg, ...p };
+      rateSlider.hidden = t.cfg.quantise !== 'off';
+      this.onChange();
+    };
+
+    const enable = toggle('Send a note when birds panic', t.cfg.enabled, (v) => patch({ enabled: v }));
+
+    const grid = el('div', 'slot-grid');
+    grid.append(
+      numberField('Ch', 1, 16, t.cfg.channel, (v) => patch({ channel: v })),
+      numberField('Note', 0, 127, t.cfg.note, (v) => patch({ note: v })),
+      numberField('Vel', 1, 127, t.cfg.velocity, (v) => patch({ velocity: v })),
+      numberField('Gate ms', 2, 2000, t.cfg.gateMs, (v) => patch({ gateMs: v })),
+    );
+
+    const quantRow = el('div', 'slot-row');
+    const quant = select<Quantise>(QUANTISE_OPTIONS, t.cfg.quantise, (v) => patch({ quantise: v }));
+    quant.setAttribute('aria-label', 'Trigger quantise');
+    quantRow.append(el('span', 'field-label', 'Quantise'), quant);
+
+    const velRow = el('div', 'slot-row');
+    const vel = select<VelocityMode>(
+      [
+        { value: 'burst', label: 'Burst size (up to Vel)' },
+        { value: 'fixed', label: 'Fixed' },
+      ],
+      t.cfg.velocityMode,
+      (v) => patch({ velocityMode: v }),
+    );
+    vel.setAttribute('aria-label', 'Trigger velocity mode');
+    velRow.append(el('span', 'field-label', 'Velocity'), vel);
+
+    const rateSlider = slider({
+      label: 'Max rate',
+      min: 1,
+      max: 60,
+      step: 1,
+      value: t.cfg.maxRate,
+      format: (v) => `${v}/s`,
+      onInput: (v) => patch({ maxRate: v }),
+    });
+    rateSlider.hidden = t.cfg.quantise !== 'off';
+
+    const threshold = slider({
+      label: 'Panic threshold',
+      min: 0.05,
+      max: 1,
+      step: 0.05,
+      value: t.cfg.threshold,
+      format: (v) => v.toFixed(2),
+      onInput: (v) => patch({ threshold: v }),
+    });
+
+    const testBtn = button('Send test note', () => t.test(performance.now()), 'btn btn-small');
+    testBtn.title = 'Send one note so your DAW or VCV can learn it';
+    const testRow = el('div', 'row');
+    testRow.append(testBtn);
+
+    const help = el('p', 'help');
+    help.textContent =
+      'One note per grid step while birds are crossing into panic, louder the more birds panicked. In VCV Rack use MIDI-Gate or MIDI-CV.';
+
+    return [enable, statusRow, grid, velRow, quantRow, rateSlider, threshold, testRow, help];
+  }
+
+  private refreshClockInputs(): void {
+    const c = this.engine.clock;
+    const opts = [
+      { value: '', label: 'Any input' },
+      ...c.inputs().map((p) => ({ value: p.id, label: p.name })),
+      { value: 'none', label: 'Internal clock only' },
+    ];
+    if (c.inputId && c.inputId !== 'none' && !opts.some((o) => o.value === c.inputId)) {
+      opts.push({ value: c.inputId, label: 'Disconnected input' });
+    }
+    setOptions(this.clockSelect, opts, c.inputId);
+    this.clockSelect.disabled = this.engine.output.status.kind !== 'ready';
   }
 
   private buildSlots(): HTMLElement {
@@ -199,6 +315,27 @@ export class MidiPanel {
     }
     this.statusLine.textContent = status;
     this.statusLine.dataset.tone = tone;
+
+    // Clock
+    const c = e.clock;
+    const pos = c.position();
+    const where = `bar ${pos.bar}.${pos.beat}`;
+    if (c.source === 'external') {
+      this.clockStatus.textContent = c.running
+        ? `External clock · ${c.bpm.toFixed(1)} BPM · ${where}`
+        : `External clock · stopped · ${c.bpm.toFixed(1)} BPM`;
+      this.clockStatus.dataset.tone = 'ok';
+    } else {
+      this.clockStatus.textContent = `Internal · ${c.bpm.toFixed(0)} BPM · ${where}`;
+      this.clockStatus.dataset.tone = 'idle';
+    }
+
+    // Triggers
+    const t = e.triggers;
+    this.trigDot.classList.toggle('is-on', t.lastSentAt > 0 && nowMs - t.lastSentAt < ACTIVITY_MS && nowMs >= t.lastSentAt);
+    this.trigStatus.textContent = t.cfg.enabled
+      ? `${Math.round(t.onsetRate)} panics/s · ${t.sentCount.toLocaleString()} notes sent${t.sentCount ? ` · last vel ${t.lastVelocity}` : ''}`
+      : 'Off';
 
     for (let i = 0; i < this.views.length; i++) {
       const v = this.views[i];

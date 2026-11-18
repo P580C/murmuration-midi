@@ -25,6 +25,7 @@ const sent: number[][] = [];
 Object.defineProperty(e.output, 'connected', { get: () => true });
 e.output.sendCC = (ch, cc, val) => { sent.push([ch, cc, val]); return true; };
 const w = new World(1080, 900);
+w.threat.mode = 'manual';
 let t = 0;
 const run = (sec: number) => { for (let i = 0; i < sec * 60; i++) { w.step(); t += 1000 / 60; e.update(w.descriptors, SIM_DT, t); } };
 run(1);
@@ -45,4 +46,73 @@ check('after learn: resync all enabled', new Set(sent.map((m) => m[1])).size ===
 
 sent.length = 0; e.sending = false; run(1);
 check('master off silent', sent.length === 0);
-process.exit(ok ? 0 : 1);
+
+// ---------- Clock ----------
+import('../src/midi/clock').then(async ({ Clock, TICKS_PER_BAR }) => {
+  const { TriggerEngine } = await import('../src/midi/triggers');
+
+  const c = new Clock();
+  const ticks: number[] = [];
+  c.onTick((t) => ticks.push(t.tick));
+  // Internal at 120 BPM: 48 ticks per second.
+  c.poll(1000); c.poll(2000);
+  check('internal ~48 ticks/s at 120', Math.abs(ticks.length - 49) <= 1, `(${ticks.length})`);
+
+  // External clock at 125 BPM: 20 ms per tick.
+  ticks.length = 0;
+  c.handleMessage([0xfa], 3000); // Start
+  let t = 3000;
+  for (let i = 0; i < 96 * 2; i++) { t += 20; c.handleMessage([0xf8], t); c.poll(t); }
+  check('external takes over', c.source === 'external');
+  check('external BPM ≈ 125', Math.abs(c.bpm - 125) < 0.5, `(${c.bpm.toFixed(2)})`);
+  check('start → first tick is 0 (downbeat)', ticks[0] === 0);
+  check('position: last tick of bar 2 is beat 4', c.position().bar === 2 && c.position().beat === 4, JSON.stringify(c.position()));
+
+  ticks.length = 0;
+  c.handleMessage([0xfc], t); // Stop
+  for (let i = 0; i < 24; i++) { t += 20; c.handleMessage([0xf8], t); }
+  check('stop halts ticks', ticks.length === 0);
+  c.handleMessage([0xf2, 8, 0], t); // SPP: 16th #8 = bar 1 beat 3
+  c.handleMessage([0xfb], t); // Continue
+  t += 20; c.handleMessage([0xf8], t);
+  check('song position + continue', ticks[0] === 48, `(${ticks[0]})`);
+
+  c.poll(t + 1000);
+  check('falls back to internal when clock stops', c.source === 'internal');
+
+  // ---------- Triggers ----------
+  const notes: { vel: number; at?: number; gate: number }[] = [];
+  const tr = new TriggerEngine((_ch, _n, vel, gate, at) => { notes.push({ vel, at, gate }); return true; });
+  tr.addOnsets(5, 1 / 60, 0, true);
+  tr.addOnsets(40, 1 / 60, 0, true);
+  check('quantised: nothing until grid', notes.length === 0);
+  tr.onTick({ tick: 3, time: 10 }, 120, true);
+  check('quantised: not on off-grid tick', notes.length === 0);
+  tr.onTick({ tick: 6, time: 20 }, 120, true);
+  check('quantised: one note for 45 onsets', notes.length === 1 && notes[0].at === 20);
+  check('burst velocity scales', notes[0].vel > 100, `(${notes[0].vel})`);
+  tr.addOnsets(1, 1 / 60, 0, true); tr.onTick({ tick: 12, time: 30 }, 120, true);
+  check('single onset quieter', notes[1].vel < 60, `(${notes[1].vel})`);
+  tr.onTick({ tick: 18, time: 40 }, 120, true);
+  check('no note when nothing pending', notes.length === 2);
+  tr.cfg = { ...tr.cfg, gateMs: 500 }; tr.addOnsets(3, 1 / 60, 0, true); tr.onTick({ tick: 24, time: 50 }, 120, true);
+  check('gate clamped below grid step', notes[2].gate < 125, `(${notes[2].gate.toFixed(0)} ms)`);
+  tr.cfg = { ...tr.cfg, quantise: 'off', maxRate: 10, gateMs: 20 };
+  notes.length = 0;
+  for (let i = 0; i < 60; i++) tr.addOnsets(3, 1 / 60, i * (1000 / 60), true);
+  check('unquantised rate limit ≈ 10/s', notes.length >= 9 && notes.length <= 11, `(${notes.length})`);
+  notes.length = 0; tr.addOnsets(3, 1 / 60, 999999, false);
+  check('muted when cannot send', notes.length === 0);
+
+  // ---------- Panic onsets from a strike ----------
+  const w2 = new World(1080, 900); w2.threat.mode = 'manual';
+  for (let i = 0; i < 120; i++) w2.step();
+  w2.flock.takePanicOnsets();
+  check('no onsets without a threat', w2.flock.takePanicOnsets() === 0);
+  w2.strike(); let total = 0;
+  for (let i = 0; i < 60 * 5; i++) { w2.step(); total += w2.flock.takePanicOnsets(); }
+  check('a strike produces panic onsets', total > 20, `(${total} birds of ${w2.flock.n})`);
+  void TICKS_PER_BAR;
+  process.exit(ok ? 0 : 1);
+});
+

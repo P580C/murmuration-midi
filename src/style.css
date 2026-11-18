@@ -19,6 +19,11 @@
   box-sizing: border-box;
 }
 
+/* Component display rules (flex/grid) would otherwise override the hidden attribute. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;

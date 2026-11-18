@@ -164,6 +164,18 @@ export class Flock {
     return this.panicSig.v;
   }
 
+  /** Panic level a bird must cross to count as a panic onset (for triggers). */
+  panicThreshold = 0.5;
+  /** Birds that crossed panicThreshold upward since the last takePanicOnsets(). */
+  private onsets = 0;
+
+  /** Return and reset the number of panic onsets since the last call. */
+  takePanicOnsets(): number {
+    const n = this.onsets;
+    this.onsets = 0;
+    return n;
+  }
+
   /** Slab depth used in the last step (for the renderer). */
   depth = 1;
   /** Running count of hard-limit corrections (diagnostic: should stay near zero). */
@@ -328,6 +340,8 @@ export class Flock {
 
     let disorderSum = 0;
     let disorderN = 0;
+    let onsets = 0;
+    const onsetThr = this.panicThreshold;
 
     for (let i = 0; i < n; i++) {
       const xi = x[i];
@@ -443,6 +457,7 @@ export class Flock {
           }
         }
       }
+      if (pn >= onsetThr && P.v[i] < onsetThr) onsets++;
       P.write(i, pn, ex, ey, ez);
 
       // ---- Turning wave: relayed from the neighbour most into the turn.
@@ -668,5 +683,6 @@ export class Flock {
     T.swap();
 
     this.localDisorder = disorderN > 0 ? disorderSum / disorderN : 0;
+    this.onsets += onsets;
   }
 }

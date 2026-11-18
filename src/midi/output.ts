@@ -59,6 +59,11 @@ export class MidiOutput {
     this.emit();
   }
 
+  /** The MIDIAccess object once granted (shared with the clock input). */
+  get midiAccess(): MIDIAccess | null {
+    return this.access;
+  }
+
   /** True when a selected port is present and connected. */
   get connected(): boolean {
     return this.port !== null && this.port.state === 'connected';
@@ -74,6 +79,24 @@ export class MidiOutput {
     if (!port || port.state !== 'connected') return false;
     try {
       port.send([0xb0 | ((channel - 1) & 0x0f), cc & 0x7f, value & 0x7f]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Note on now (or at `at`, a performance.now() time) and note off `gateMs` later.
+   * Both are scheduled with Web MIDI timestamps, so no timers are needed.
+   */
+  sendNote(channel: number, note: number, velocity: number, gateMs: number, at?: number): boolean {
+    const port = this.port;
+    if (!port || port.state !== 'connected') return false;
+    const ch = (channel - 1) & 0x0f;
+    const start = Math.max(performance.now(), at ?? 0);
+    try {
+      port.send([0x90 | ch, note & 0x7f, Math.max(1, velocity & 0x7f)], start);
+      port.send([0x80 | ch, note & 0x7f, 0], start + gateMs);
       return true;
     } catch {
       return false;

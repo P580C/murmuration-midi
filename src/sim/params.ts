@@ -15,11 +15,15 @@ export interface FlockParams {
   cohesion: number;
 }
 
+export type ThreatMode = 'manual' | 'timer' | 'bars';
+
 export interface ThreatParams {
-  /** Strike automatically on a timer. */
-  auto: boolean;
-  /** Seconds between automatic strikes. */
+  /** manual: only on demand. timer: every `interval` seconds. bars: every `bars` bars of the clock. */
+  mode: ThreatMode;
+  /** Seconds between timer strikes. */
   interval: number;
+  /** Bars between clock-synced strikes. */
+  bars: number;
 }
 
 export const DEFAULT_FLOCK: FlockParams = {
@@ -33,8 +37,9 @@ export const DEFAULT_FLOCK: FlockParams = {
 };
 
 export const DEFAULT_THREAT: ThreatParams = {
-  auto: true,
+  mode: 'timer',
   interval: 10,
+  bars: 4,
 };
 
 export const LIMITS = {

@@ -26,7 +26,8 @@ src/sim/       pure simulation, no DOM (can move to a worker later)
   predator.ts    threat agent: spawns off-screen, homes on one bird with limited turn rate, leaves
   descriptors.ts 0-1 stream sources computed every step
   world.ts       owns flock + predator + nav target; triggers turning waves; fixed 60 Hz step; auto strike
-src/midi/      slots.ts (pure mapping), output.ts (Web MIDI), engine.ts (throttle + learn)
+src/midi/      slots.ts (pure mapping), output.ts (Web MIDI out, CC + timestamped notes), engine.ts (throttle + learn),
+               clock.ts (MIDI clock in + internal fallback), triggers.ts (panic → quantised notes)
 src/render/    canvas 2D renderer (reads the world only); flattens the 3D slab with depth cues + additive blending
 src/ui/        placeholder controls, meters, MIDI panel. To be replaced by the Figma build
 src/ticker.ts  Web Worker interval: drives sim + MIDI so they keep running when the window is hidden
@@ -50,11 +51,14 @@ tools/         headless test + metric scripts (bundled with esbuild via tools/ru
 - **When turns happen (world.ts `updateNav`):** every 3-8 s, when the flock reaches its target, or when its predicted centroid passes 70% of the sky ellipse (1.5 s cooldown). Boundary turns pick a target that reverses the flock's rotation about the centre 75% of the time. Without that, every inward turn keeps the same rotation and the flock orbits; boundary-following was the root cause of the "fish in a tank" look.
 - **Containment layers:** (1) weak pull (0.2) toward the nav target; (2) a sky ellipsoid (36% × 34% of the view, 40% of the slab depth) with a strong pull back once a bird's predicted position leaves it; (3) a thin last-resort edge zone (7%, and the slab's front/back) plus a hard clamp 6 px from the window edge. Birds never flee outward near an edge, and noise fades in the edge zone.
 - **Banking turns:** sideways acceleration is capped at v²/r_min, with r_min = 0.25 s × cruise speed, halved when panicking.
+- **Clock (milestone 5):** listens on any input or a chosen one (or internal only). 24 ppqn; Start → next pulse is tick 0 (downbeat); Continue/Stop honoured; Song Position Pointer jumps. BPM is smoothed over about a beat. If no pulse arrives for 600 ms it falls back to the internal clock at the manual BPM and keeps counting from the same position. Ticks carry timestamps (performance.now() base). 4/4 is assumed. The internal clock is polled from the 120 Hz worker tick, so it has up to ~8 ms jitter; external ticks are handled on arrival.
+- **Threat timing:** `threat.mode` is manual / timer / bars. "On the bar" strikes on the downbeat every N bars of the clock, and only while the clock is running.
+- **Panic triggers:** the flock counts birds whose panic crosses `panicThreshold` upward (`takePanicOnsets()`); a bird can trigger again after it calms down. One strike can produce 1000+ onsets, so by default onsets are quantised (1/16): all onsets within a grid step become one note, with velocity scaling with the count ("burst", log scale, 1 bird ≈ 30%, 60+ = 100% of Vel). With quantise off they are rate-limited (max N/s). Note on/off are scheduled with Web MIDI timestamps; the gate is clamped below the grid step so repeats don't cut each other. Triggers are muted while a CC slot is learning. Defaults: ch 1, note 36, gate 20 ms. Settings persist with the MIDI state.
 - **Descriptors in 3D:** Speed, Alignment, Turbulence and Threat distance use 3D motion. Centre, Spread and Swirl use on-screen x/y so they match what you see.
 
 ## Status
 
-Done: spec milestones 1-4 (single flock sim, threat, stream meters, MIDI out with learn), plus containment work.
+Done: spec milestones 1-5 (single flock sim, threat, stream meters, MIDI out with learn, MIDI clock in + bar-synced strikes), plus containment/3D work and panic triggers (an extra output the user asked for). `npm test` runs 36 checks.
 
 Measured (`npm run metrics:flight` / `metrics:bounds`, default settings, auto strike every 10 s):
 
@@ -72,7 +76,9 @@ Performance: 1.5 ms/step for 1200 birds, 6.3 ms/step for 4000 (Node). Fine at 60
 
 - **Flock look:** reworked to 3D + turning waves after the user reported "fish in a tank" (edge-hugging, circling, corners). Screenshots now show ribbons, folds and density bands. Wait for user feedback before tuning further. Possible next levers: density (more birds by default, smaller separation), wave initiation rate, slab depth.
 - 4000 birds costs 6.3 ms/step. If that's a problem, move the sim to a worker or use WebGL rendering.
-- Milestone 5: MIDI clock in (24 ppqn, Start/Stop/Continue), BPM fallback, clock-synced strikes. VCV Rack's Core CV-MIDI may provide clock (to verify).
+- Clock has not been tested against a real DAW or VCV Rack yet, only with simulated messages. VCV Rack's Core CV-MIDI may provide clock output (to verify).
+- Milestone 7's "MIDI note launches a strike" must not listen to the port the app sends panic triggers on, or the triggers would loop back.
+- Spec ideas not done yet: speed scaling with BPM, randomness waves lasting N bars, flock-driven tempo.
 - Milestone 6: 2-4 flocks + interaction slider (slots already carry a `flock` field, always 0 for now).
 - Milestone 7: presets (JSON), 14-bit/NRPN/OSC (open decision), MIDI input to trigger the threat.
 - The Figma link is still missing; the UI is placeholder.

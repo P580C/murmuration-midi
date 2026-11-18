@@ -155,7 +155,7 @@ export class World {
   step(dt: number = SIM_DT): void {
     this.time += dt;
 
-    if (this.threat.auto && !this.predator.active) {
+    if (this.threat.mode === 'timer' && !this.predator.active) {
       this.strikeCountdown -= dt;
       if (this.strikeCountdown <= 0) this.strike();
     }

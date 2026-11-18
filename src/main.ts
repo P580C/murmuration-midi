@@ -1,12 +1,14 @@
 import './style.css';
+import { TICKS_PER_BAR } from './midi/clock';
 import { MidiEngine } from './midi/engine';
 import { SLOT_COUNT, sanitizeSlot } from './midi/slots';
+import { sanitizeTrigger } from './midi/triggers';
 import { Renderer } from './render/renderer';
-import { LIMITS } from './sim/params';
+import { LIMITS, type ThreatMode } from './sim/params';
 import { SIM_DT, World } from './sim/world';
 import { loadJSON, saveJSON } from './storage';
 import { startTicker } from './ticker';
-import { button, el, section, slider, toggle } from './ui/controls';
+import { button, el, section, select, slider } from './ui/controls';
 import { MeterPanel } from './ui/meters';
 import { MidiPanel } from './ui/midiPanel';
 
@@ -35,8 +37,14 @@ resize();
 const MIDI_KEY = 'murmuration.midi.v1';
 const midi = new MidiEngine();
 {
-  const saved = loadJSON(MIDI_KEY) as { portId?: unknown; sending?: unknown; slots?: unknown } | undefined;
+  const saved = loadJSON(MIDI_KEY) as
+    | { portId?: unknown; sending?: unknown; slots?: unknown; trigger?: unknown; clockInput?: unknown; bpm?: unknown }
+    | undefined;
   if (saved) {
+    midi.triggers.cfg = sanitizeTrigger(saved.trigger);
+    if (typeof saved.clockInput === 'string') midi.clock.inputId = saved.clockInput;
+    const bpm = Number(saved.bpm);
+    if (Number.isFinite(bpm) && bpm >= 20 && bpm <= 300) midi.clock.manualBpm = bpm;
     if (typeof saved.portId === 'string') midi.output.selectedId = saved.portId;
     if (typeof saved.sending === 'boolean') midi.sending = saved.sending;
     if (Array.isArray(saved.slots)) {
@@ -45,8 +53,15 @@ const midi = new MidiEngine();
   }
 }
 const saveMidi = () =>
-  saveJSON(MIDI_KEY, { portId: midi.output.selectedId, sending: midi.sending, slots: midi.slots });
-void midi.output.init();
+  saveJSON(MIDI_KEY, {
+    portId: midi.output.selectedId,
+    sending: midi.sending,
+    slots: midi.slots,
+    trigger: midi.triggers.cfg,
+    clockInput: midi.clock.inputId,
+    bpm: midi.clock.manualBpm,
+  });
+void midi.init();
 const midiPanel = new MidiPanel(midi, saveMidi);
 
 // ---------- Flock tab ----------
@@ -77,26 +92,54 @@ const strikeRow = el('div', 'row');
 const countdown = el('span', 'muted');
 strikeRow.append(strikeBtn, countdown);
 
-const threatSection = section(
-  'Threat',
-  strikeRow,
-  toggle('Auto strike', world.threat.auto, (v) => {
-    world.threat.auto = v;
-    world.strikeCountdown = world.threat.interval;
-  }),
-  slider({
-    label: 'Interval',
-    min: 3,
-    max: 30,
-    step: 1,
-    value: world.threat.interval,
-    format: (v) => `${v}s`,
-    onInput: (v) => {
-      world.threat.interval = v;
-      world.strikeCountdown = Math.min(world.strikeCountdown, v);
-    },
-  }),
+const intervalSlider = slider({
+  label: 'Every',
+  min: 3,
+  max: 30,
+  step: 1,
+  value: world.threat.interval,
+  format: (v) => `${v}s`,
+  onInput: (v) => {
+    world.threat.interval = v;
+    world.strikeCountdown = Math.min(world.strikeCountdown, v);
+  },
+});
+const barsSlider = slider({
+  label: 'Every',
+  min: 1,
+  max: 16,
+  step: 1,
+  value: world.threat.bars,
+  format: (v) => `${v} bar${v === 1 ? '' : 's'}`,
+  onInput: (v) => (world.threat.bars = v),
+});
+const timingRow = el('div', 'slot-row');
+const timingSelect = select<ThreatMode>(
+  [
+    { value: 'timer', label: 'Timer' },
+    { value: 'bars', label: 'On the bar (clock)' },
+    { value: 'manual', label: 'Manual only' },
+  ],
+  world.threat.mode,
+  (v) => setThreatMode(v),
 );
+timingSelect.setAttribute('aria-label', 'Strike timing');
+timingRow.append(el('span', 'control-label', 'Timing'), timingSelect);
+function setThreatMode(m: ThreatMode): void {
+  world.threat.mode = m;
+  world.strikeCountdown = world.threat.interval;
+  intervalSlider.hidden = m !== 'timer';
+  barsSlider.hidden = m !== 'bars';
+}
+setThreatMode(world.threat.mode);
+
+const threatSection = section('Threat', strikeRow, timingRow, intervalSlider, barsSlider);
+
+// Clock-synced strikes land on the downbeat.
+midi.clock.onTick((t) => {
+  const every = TICKS_PER_BAR * world.threat.bars;
+  if (!view.paused && world.threat.mode === 'bars' && t.tick % every === 0) world.strike();
+});
 
 const pauseBtn = button('Pause', () => setPaused(!view.paused));
 const viewRow = el('div', 'row');
@@ -147,6 +190,18 @@ hints.innerHTML = '<kbd>Space</kbd> strike · <kbd>P</kbd> pause · <kbd>Esc</kb
 
 panel.append(header, tabBar, flockTab, midiPanel.element, hints);
 
+function strikeStatus(): string {
+  if (world.predator.active) return 'Attacking…';
+  if (world.threat.mode === 'timer') return `next in ${Math.ceil(world.strikeCountdown)}s`;
+  if (world.threat.mode === 'bars') {
+    const every = TICKS_PER_BAR * world.threat.bars;
+    const left = every - (((midi.clock.tick % every) + every) % every);
+    const beats = Math.ceil(left / (TICKS_PER_BAR / 4));
+    return midi.clock.running ? `next in ${beats} beat${beats === 1 ? '' : 's'}` : 'clock stopped';
+  }
+  return '';
+}
+
 function setPaused(p: boolean): void {
   view.paused = p;
   pauseBtn.textContent = p ? 'Resume' : 'Pause';
@@ -181,7 +236,7 @@ canvas.addEventListener('pointerdown', (e) => {
   const warmup = Number(q.get('warmup') ?? 0);
   const strikeAt = q.has('strikeAt') ? Number(q.get('strikeAt')) : -1;
   if (warmup > 0) {
-    world.threat.auto = false;
+    world.threat.mode = 'manual';
     for (let t = 0; t < warmup; t += SIM_DT) {
       if (strikeAt >= 0 && t <= strikeAt && t + SIM_DT > strikeAt) world.strike();
       world.step(SIM_DT);
@@ -201,6 +256,7 @@ function tick(): void {
   const now = performance.now();
   const elapsed = Math.min(0.25, (now - lastTick) / 1000);
   lastTick = now;
+  midi.clock.poll(now);
   if (view.paused) return;
 
   acc += elapsed;
@@ -214,7 +270,9 @@ function tick(): void {
   if (steps === MAX_STEPS) acc = 0; // drop time rather than spiral
   if (steps > 0) {
     simMs = simMs * 0.9 + ((performance.now() - t0) / steps) * 0.1;
+    world.flock.panicThreshold = midi.triggers.cfg.threshold;
     midi.update(world.descriptors, steps * SIM_DT, now);
+    midi.panicOnsets(world.flock.takePanicOnsets(), steps * SIM_DT, now);
   }
 }
 startTicker(1000 / 120, tick);
@@ -232,11 +290,7 @@ function frame(now: number): void {
   if (++meterTick % 2 === 0) {
     if (activeTab === 'flock') {
       if (!view.paused) meters.update(world.descriptors);
-      countdown.textContent = world.predator.active
-        ? 'Attacking…'
-        : world.threat.auto
-          ? `next in ${Math.ceil(world.strikeCountdown)}s`
-          : '';
+      countdown.textContent = strikeStatus();
       strikeBtn.disabled = world.predator.active;
     } else {
       midiPanel.render(now);
