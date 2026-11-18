@@ -1,0 +1,21 @@
+{
+  "name": "murmuration-midi",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "node tools/run.mjs midi-test",
+    "metrics:flight": "node tools/run.mjs flight-metrics",
+    "metrics:bounds": "node tools/run.mjs bounds-metrics",
+    "metrics:streams": "node tools/run.mjs streams"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.1.12"
+  }
+}
